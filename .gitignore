@@ -17,3 +17,6 @@ Thumbs.db
 
 # Spring Boot
 HELP.md
+
+# Runtime data (SQLite file is created on first run)
+*.db
