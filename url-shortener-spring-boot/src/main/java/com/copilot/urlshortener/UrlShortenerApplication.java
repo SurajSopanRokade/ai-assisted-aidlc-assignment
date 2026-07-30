@@ -1,28 +1,21 @@
 package com.copilot.urlshortener;
 
+import com.copilot.urlshortener.config.AppProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.context.annotation.Bean;
-import org.springframework.web.servlet.config.annotation.CorsRegistry;
-import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
+/**
+ * Application entry point.
+ *
+ * <p>CORS and other web wiring live in
+ * {@link com.copilot.urlshortener.config.WebConfig}; this class only boots.
+ */
 @SpringBootApplication
+@EnableConfigurationProperties(AppProperties.class)
 public class UrlShortenerApplication {
 
 	public static void main(String[] args) {
 		SpringApplication.run(UrlShortenerApplication.class, args);
-	}
-
-	@Bean
-	public WebMvcConfigurer corsConfigurer() {
-		return new WebMvcConfigurer() {
-			@Override
-			public void addCorsMappings(CorsRegistry registry) {
-				registry.addMapping("/**")
-						.allowedOrigins("http://localhost:3000", "http://localhost:8080")
-						.allowedMethods("GET", "POST")
-						.allowedHeaders("*");
-			}
-		};
 	}
 }
