@@ -1,0 +1,16 @@
+# Normalise line endings in the repository regardless of the platform a
+# contributor works on.
+* text=auto
+
+# The Maven wrapper is executed by /bin/sh on Linux CI runners. Checked out
+# with CRLF it fails with a confusing "bad interpreter" error, so its line
+# endings are pinned regardless of the developer's core.autocrlf setting.
+mvnw text eol=lf
+*.sh text eol=lf
+
+# Windows-only scripts keep CRLF.
+mvnw.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Generated; collapse in diffs and exclude from language statistics.
+package-lock.json linguist-generated=true
