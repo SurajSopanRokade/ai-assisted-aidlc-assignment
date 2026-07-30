@@ -1,0 +1,240 @@
+{
+  "_comment": [
+    "Curated engineering report for the URL shortener, served by POST /copilot/analyze.",
+    "",
+    "This is authored content, not generated analysis. It lives here rather than in",
+    "string literals inside CopilotEngineService so that editing documentation is not a",
+    "code change, and so the text cannot quietly drift from the implementation it describes.",
+    "",
+    "Every claim below is checked by CopilotReportAccuracyTest and cross-referenced to the",
+    "test that proves it. If a claim here is not true of the code, that test fails.",
+    "The canonical prose version of this content lives in docs/."
+  ],
+  "requirement_analysis": {
+    "functional_requirements": [
+      { "id": "FR-1", "description": "Accept a long URL and return a unique shortened URL." },
+      { "id": "FR-2", "description": "Support an optional caller-supplied custom alias." },
+      { "id": "FR-3", "description": "Redirect a short URL to its destination with HTTP 307." },
+      { "id": "FR-4", "description": "Persist the short-code to URL mapping durably." },
+      { "id": "FR-5", "description": "Track and expose per-link click analytics (count, last-clicked)." },
+      { "id": "FR-6", "description": "Reject malformed or unsupported URLs with a clear validation error." },
+      { "id": "FR-7", "description": "Prevent short-code collisions for both generated codes and custom aliases." },
+      { "id": "FR-8", "description": "Support optional link expiry, returning 410 Gone after the expiry instant." }
+    ],
+    "non_functional_requirements": [
+      {
+        "category": "Correctness under concurrency",
+        "description": "Click counts must be exact when requests overlap. Enforced by an atomic SQL increment and asserted at 100 parallel redirects in RedirectConcurrencyIntegrationTest."
+      },
+      {
+        "category": "Scalability",
+        "description": "Redirect lookup is a unique-index hit, independent of table size. The write ceiling is SQLite's single-writer lock, not the application: the connection pool is pinned to 1 so contention queues rather than fails. This is the primary constraint on throughput and is why PostgreSQL is the first change for real load."
+      },
+      {
+        "category": "Availability",
+        "description": "GET /{shortCode} is the hot path. It performs one indexed read and two writes; the writes are the latency cost and the documented candidate for asynchronous batching."
+      },
+      {
+        "category": "Data integrity",
+        "description": "The unique index on short_code is the authority on uniqueness. Application-level existence checks are an early rejection only, and a lost race surfaces as 409, never 500."
+      },
+      {
+        "category": "Security",
+        "description": "Destination URLs are restricted to http/https, aliases to alphanumerics, short_url is built from configuration rather than the Host header, and no error response carries internal detail."
+      },
+      {
+        "category": "Observability",
+        "description": "Per-request correlation ids in logs and on responses, Micrometer counters for links created and redirect outcomes, Prometheus scrape endpoint."
+      },
+      {
+        "category": "Maintainability",
+        "description": "Domain logic is free of HTTP and time dependencies (Clock is injected), so it is unit-testable without a web context or sleeps."
+      }
+    ],
+    "ambiguities": [
+      "'Scalable' carries no numeric target. No QPS, concurrent-user or data-volume figure was given, so no capacity claim is made; what is measured instead is correctness at 100 concurrent redirects.",
+      "'Analytics' is unbounded. Interpreted as click count, creation time, expiry state and last-clicked instant. Geography, referrer and device breakdowns are excluded — the per-click event table exists so they can be added without a schema migration.",
+      "'Reliability features' is unspecified. Interpreted as: bounded retries, an error contract that distinguishes client from server faults, exact click accounting under concurrency, and a health endpoint.",
+      "Link ownership and authentication were never mentioned. Assumed out of scope; every endpoint is public, which is the single largest gap between this prototype and a deployable service.",
+      "Nothing was said about abuse control. A per-instance rate limit was added on the write path as a floor, not as a complete answer."
+    ],
+    "assumptions": [
+      "Short codes are 7-character base62 (~3.5e12 keyspace), sufficient that collisions are rare at any plausible prototype volume.",
+      "SQLite is acceptable for a prototype. The JPA boundary means the swap to PostgreSQL is a configuration change plus deleting the pool-size pin.",
+      "HTTP 307 rather than 301: a permanent redirect is cached by browsers and intermediaries, which would freeze the destination and silently stop click counting.",
+      "Expiry is evaluated against server wall-clock time. Correct for a single instance; a multi-instance deployment needs a shared clock discipline or UTC instants.",
+      "Analytics remain readable after a link expires — the owner still needs the historical numbers, so only the redirect is blocked."
+    ]
+  },
+  "task_decomposition": [
+    {
+      "id": "T1",
+      "title": "Define the data model and API contracts",
+      "description": "Design the urls and click_events schema and the request/response contracts for /shorten, /{shortCode} and /analytics/{shortCode}.",
+      "depends_on": [],
+      "ai_assistance": "AI drafted the JPA entities and DTOs from a field-list prompt. Engineer added the unique index on short_code and introduced the separate click_events table, which the draft omitted in favour of a bare counter column — a counter alone cannot answer any time-based analytics question later."
+    },
+    {
+      "id": "T2",
+      "title": "Implement short-code allocation",
+      "description": "Base62 generation with collision handling, isolated from the HTTP layer.",
+      "depends_on": ["T1"],
+      "ai_assistance": "AI generated a random-code function with no uniqueness check and an unbounded retry loop. Engineer rejected both: added the existence check, bounded the loop to 5 attempts, and made exhaustion a typed exception mapped to 503. See docs/AI_TRACEABILITY.md entry AI-02."
+    },
+    {
+      "id": "T3",
+      "title": "Implement the three endpoints",
+      "description": "Wire controllers to the service with validation, status codes and error translation.",
+      "depends_on": ["T2"],
+      "ai_assistance": "AI proposed 301 for the redirect; engineer changed it to 307 because a cached permanent redirect breaks both repointing and click counting. AI also built short_url from the inbound Host header, which is a client-controlled value; replaced with configuration. See AI-03 and AI-05."
+    },
+    {
+      "id": "T4",
+      "title": "Unit-test the domain service",
+      "description": "Cover code allocation, collision paths, expiry boundaries and analytics aggregation without a web context.",
+      "depends_on": ["T2"],
+      "ai_assistance": "AI drafted happy-path cases only. Engineer added the retry-exhaustion path, the duplicate-alias path, the never-clicked analytics case, and both expiry boundary cases (expiry equal to now, and expiry one nanosecond ahead). Clock injection replaced the draft's sleep-based timing."
+    },
+    {
+      "id": "T5",
+      "title": "Integration-test the HTTP contract",
+      "description": "Full shorten to redirect to analytics flow plus every error status, through the real Spring stack.",
+      "depends_on": ["T3"],
+      "ai_assistance": "AI's draft called deleteAll() against whatever database was configured, which deletes a developer's local data when run outside CI. Engineer added a dedicated test profile and pinned surefire to it. See AI-06."
+    },
+    {
+      "id": "T6",
+      "title": "Build the requirement-input frontend",
+      "description": "React and TypeScript UI for shortening, analytics and the engineering report.",
+      "depends_on": ["T1"],
+      "ai_assistance": "AI scaffolded the component structure and Tailwind classes. Engineer consolidated fetch state into a typed client module and kept components presentational."
+    },
+    {
+      "id": "T7",
+      "title": "Harden the error contract",
+      "description": "Ensure client mistakes return 4xx and no response carries internal detail.",
+      "depends_on": ["T3"],
+      "ai_assistance": "The defect was found by probing the running service, not by reading code or by any AI suggestion: a malformed date returned 500 with Jackson's internal type names. AI was then used to enumerate which Spring exceptions bypass @RestControllerAdvice; the enumeration was checked against the framework and against live requests rather than trusted, which is how the filter-ordering problem in T9 was caught. See AI-07."
+    },
+    {
+      "id": "T8",
+      "title": "Fix concurrency on the redirect path",
+      "description": "Make click accounting exact and eliminate lock-contention failures.",
+      "depends_on": ["T3"],
+      "ai_assistance": "Found by load-probing the running service (100 parallel redirects returned 20 clicks and 80 failures), not by review. A JVM-level synchronized block was considered and rejected: it serialises within one process and does nothing across instances, while the race is in the database. Chose an atomic SQL increment plus WAL journaling, and wrote the regression test before the fix so the failure was reproduced first. See AI-08."
+    },
+    {
+      "id": "T9",
+      "title": "Observability and abuse control",
+      "description": "Correlation ids, business metrics, and a write-path rate limit.",
+      "depends_on": ["T3"],
+      "ai_assistance": "AI's rate-limiter draft keyed on X-Forwarded-For, which is client-supplied and lets an attacker bypass the limit by rotating the header. Engineer keyed on the socket address and documented the proxy configuration that makes that correct. The draft also had an unbounded counter map; eviction was added. See AI-09."
+    },
+    {
+      "id": "T10",
+      "title": "Documentation and scenario write-ups",
+      "description": "Architecture, three scenario walkthroughs, AI traceability log, limitations register.",
+      "depends_on": ["T7", "T8", "T9"],
+      "ai_assistance": "AI drafted prose and Mermaid diagrams. Engineer verified every factual claim against the code; several statements in the first draft described intended rather than shipped behaviour and were corrected or removed."
+    }
+  ],
+  "engineering_artifacts": {
+    "folder_structure": [
+      "src/main/java/com/copilot/urlshortener/UrlShortenerApplication.java",
+      "src/main/java/com/copilot/urlshortener/config/*.java",
+      "src/main/java/com/copilot/urlshortener/web/*.java",
+      "src/main/java/com/copilot/urlshortener/controller/*.java",
+      "src/main/java/com/copilot/urlshortener/service/*.java",
+      "src/main/java/com/copilot/urlshortener/repository/*.java",
+      "src/main/java/com/copilot/urlshortener/model/*.java",
+      "src/main/java/com/copilot/urlshortener/dto/**/*.java",
+      "src/main/java/com/copilot/urlshortener/exception/*.java",
+      "src/main/resources/application*.properties",
+      "src/test/java/com/copilot/urlshortener/**/*.java",
+      "frontend/src/**/*.tsx",
+      "docs/*.md"
+    ],
+    "database_schema": "urls(id PK, original_url TEXT NOT NULL, short_code VARCHAR(16) NOT NULL UNIQUE INDEXED, click_count INTEGER NOT NULL DEFAULT 0, created_at DATETIME NOT NULL, expires_at DATETIME NULL). click_events(id PK, url_id FK -> urls.id, clicked_at DATETIME NOT NULL). The event table exists so analytics can grow beyond a counter without a migration; last-clicked is computed with a max() aggregate rather than by loading the collection.",
+    "api_contracts": [
+      "POST /shorten { original_url, custom_alias?, expires_at? } -> 201 { id, original_url, short_code, short_url, created_at, expires_at } | 400 malformed body | 409 alias taken | 422 validation | 429 rate limited",
+      "GET /{shortCode} -> 307 Location: original_url, Cache-Control: no-store | 404 unknown | 410 expired | 422 malformed code",
+      "GET /analytics/{shortCode} -> 200 { short_code, original_url, click_count, created_at, expires_at, expired, last_clicked_at } | 404 unknown",
+      "POST /copilot/analyze { requirement } -> 200 engineering report | 422 validation",
+      "GET /v3/api-docs -> generated OpenAPI 3 contract",
+      "GET /actuator/health | /actuator/metrics | /actuator/prometheus"
+    ],
+    "key_files": [
+      { "path": "src/main/java/com/copilot/urlshortener/service/ShortenerService.java", "description": "Domain logic: code allocation, expiry evaluation against an injected Clock, click recording, analytics." },
+      { "path": "src/main/java/com/copilot/urlshortener/controller/GlobalExceptionHandler.java", "description": "The whole client-facing error contract. Client faults are 4xx; the catch-all returns a fixed message plus a correlation id." },
+      { "path": "src/main/java/com/copilot/urlshortener/repository/UrlRepository.java", "description": "Atomic click increment; the reason concurrent counting is exact." },
+      { "path": "src/main/java/com/copilot/urlshortener/web/RateLimitFilter.java", "description": "Fixed-window write-path quota, keyed on the socket address rather than a spoofable header." },
+      { "path": "src/main/java/com/copilot/urlshortener/config/AppProperties.java", "description": "Validated configuration, including the base URL that replaced Host-header derivation." },
+      { "path": "src/test/java/com/copilot/urlshortener/controller/RedirectConcurrencyIntegrationTest.java", "description": "Proves 100 parallel redirects all succeed and are all counted." },
+      { "path": "src/test/java/com/copilot/urlshortener/controller/ErrorContractIntegrationTest.java", "description": "Proves no response body carries framework, driver or SQL internals." }
+    ]
+  },
+  "validation": {
+    "code_review": [
+      { "area": "ShortenerService — code allocation", "finding": "AI's draft retried code generation in an unbounded loop with no uniqueness check. Bounded to 5 attempts with a typed exception on exhaustion; the bound is asserted directly (verify existsByShortCode called exactly 5 times).", "severity": "Medium — fixed, test-covered" },
+      { "area": "ShortenerService — click counting", "finding": "Click count was incremented in memory via read-modify-write, losing updates under overlap: 100 parallel redirects recorded 20. Replaced with an atomic SQL increment.", "severity": "High — fixed, test-covered" },
+      { "area": "ShortenerService — analytics", "finding": "last_clicked_at was computed by loading every click event into memory and streaming for a maximum, so the query degraded exactly on the most popular links. Replaced with a max() aggregate.", "severity": "Medium — fixed, test-covered" },
+      { "area": "GlobalExceptionHandler", "finding": "The catch-all concatenated ex.getMessage() into the response. Live requests returned Jackson's internal type names and a raw INSERT statement to the caller. Now returns a fixed message plus an error_id that correlates to the log entry.", "severity": "High — fixed, test-covered" },
+      { "area": "UrlController", "finding": "RedirectView applies its own processing to a caller-supplied destination. Replaced with an explicit ResponseEntity carrying Location and Cache-Control: no-store, so a cached 307 cannot silently stop click counting.", "severity": "Low — fixed, test-covered" }
+    ],
+    "security_review": [
+      { "area": "Destination validation", "finding": "original_url is restricted to http/https and 2048 characters, keeping javascript: and data: payloads out of storage.", "severity": "Medium — fixed, test-covered" },
+      { "area": "Alias validation", "finding": "custom_alias is alphanumeric and 3-16 characters, so a code cannot alter how the redirect route is matched.", "severity": "Medium — fixed, test-covered" },
+      { "area": "Host header injection", "finding": "short_url was built from the inbound Host header, so a request carrying Host: evil.example.com received a link advertising that domain — a phishing and cache-poisoning primitive. Now built from app.base-url.", "severity": "High — fixed, test-covered" },
+      { "area": "Error disclosure (CWE-209)", "finding": "Internal exception text no longer reaches clients on any path; asserted against a forbidden-fragment list covering framework, driver and SQL keywords.", "severity": "High — fixed, test-covered" },
+      { "area": "Log injection (CWE-117)", "finding": "An inbound X-Request-Id is echoed into log lines, so it is stripped to [A-Za-z0-9._-] and truncated before use.", "severity": "Low — fixed" },
+      { "area": "Destination logging", "finding": "Full destination URLs are no longer logged at INFO; a caller-supplied URL can carry credentials or tokens in its query string.", "severity": "Medium — fixed" },
+      { "area": "Rate limiting", "finding": "A fixed-window quota now guards POST /shorten. Counters are in-memory, so the limit is per instance: behind N replicas the effective limit is N times the configured value. A shared store or gateway policy is required for a real deployment.", "severity": "Medium — partially addressed, documented in LIMITATIONS.md" },
+      { "area": "Authentication and authorization", "finding": "Every endpoint is public. Anyone can create a link, and anyone holding a short code can read its analytics. This is the largest gap between the prototype and a deployable service.", "severity": "High — open, documented in LIMITATIONS.md" },
+      { "area": "Open redirect", "finding": "The service redirects to arbitrary caller-supplied destinations by design. There is no reputation or allowlist check, so it can be used to lend credibility to a malicious link. Mitigation would be a domain reputation feed plus an interstitial for unknown destinations.", "severity": "Medium — open by design, documented in LIMITATIONS.md" },
+      { "area": "Dependency scanning", "finding": "No automated CVE scanning of the dependency tree is wired into the build.", "severity": "Medium — open, documented in LIMITATIONS.md" },
+      { "area": "Log injection (CWE-117) — verification", "finding": "The sanitiser stripping newlines from an inbound X-Request-Id is covered directly rather than assumed: newline stripping, truncation at 64 characters, and the fallback when nothing survives sanitisation.", "severity": "Low — fixed, test-covered" }
+    ],
+    "performance_review": [
+      { "area": "Redirect lookup", "finding": "short_code carries a unique index, so resolution is an index seek rather than a scan and is independent of table size.", "severity": "Low — verified" },
+      { "area": "Write contention", "finding": "Every redirect writes. WAL journaling plus a 5s busy timeout plus a single-connection pool converts lock contention into fair queueing; before this, 80 of 100 concurrent redirects failed with SQLITE_BUSY. The cost is that write throughput is bounded by one writer.", "severity": "High — fixed, test-covered; ceiling documented" },
+      { "area": "Synchronous click recording", "finding": "The click insert and counter update still happen inside the redirect request. Acceptable at prototype scale; at higher volume this should move to a batched asynchronous writer, accepting bounded staleness in analytics.", "severity": "Medium — open, documented in LIMITATIONS.md" },
+      { "area": "No caching layer", "finding": "Every redirect reaches the database. A read-through cache on hot short codes is the obvious next step and is not implemented.", "severity": "Medium — open, documented in LIMITATIONS.md" },
+      { "area": "Analytics aggregate", "finding": "last_clicked_at is a single max() rather than a full collection load, so cost is constant in click volume.", "severity": "Medium — fixed" }
+    ],
+    "missing_edge_cases": [
+      "Sustained write load is untested. The concurrency test proves a burst of 100 overlapping redirects is correct; it does not establish a throughput figure, and no load test exists.",
+      "Multi-instance behaviour is untested end to end: the rate limit is per instance, and expiry compares against each instance's wall clock.",
+      "The 2048-character boundary on original_url is enforced by annotation but has no explicit off-by-one test.",
+      "Clock skew between instances could make a link live on one node and expired on another.",
+      "There is no test for a destination that is itself a short link on this service, which would allow a redirect loop between two links."
+    ],
+    "test_coverage_summary": "71 automated tests, all green on `mvnw verify`. Unit: code allocation, blank-alias handling, duplicate alias, bounded retry exhaustion (asserting exactly 5 attempts, so the bound itself is pinned), atomic-increment delegation, both expiry boundaries (equal-to-now and one nanosecond ahead), analytics with and without clicks, expired-but-readable analytics, metric emission, requirement-triage heuristics, and correlation-id sanitisation including log-injection stripping and truncation. Integration: full shorten/redirect/analytics flow, custom alias, duplicate alias 409, scheme rejection, path-separator alias rejection, past-expiry rejection, unknown code 404, expired 410, correlation-id header, Host-header independence, seven error-contract cases asserting no internal detail leaks, 100-request redirect concurrency with exact click accounting, 20-request alias race with exactly one winner, rate-limit enforcement, and the actuator/OpenAPI surface. Measured branch coverage (JaCoCo, target/site/jacoco): ShortenerService 100% branch and 100% line; RequestIdFilter 100% and 100%; CopilotEngineService 75% branch, 96.9% line; GlobalExceptionHandler 62.5% branch (the uncovered branches are defensive fallbacks that need a filter-level failure to reach); RateLimitFilter 60% branch (map eviction under a 10,000-client window is not exercised). A JaCoCo check bound to the verify phase fails the build if ShortenerService branch coverage drops below 80%, so this is a measured figure rather than an estimate."
+  },
+  "risk_analysis": {
+    "risks": [
+      { "category": "Security", "risk": "Endpoints are unauthenticated, so link creation and analytics are open to anyone.", "mitigation": "Not mitigated. Accepted for a prototype and recorded as the top item in LIMITATIONS.md; the fix is API keys or OAuth2 resource-server plus an owner column on urls." },
+      { "category": "Security", "risk": "The service will redirect to any http/https destination, which can lend credibility to a malicious link.", "mitigation": "Partially mitigated by scheme and length validation. Reputation checking and an interstitial for unknown domains are not implemented." },
+      { "category": "Scalability", "risk": "SQLite permits one writer, and every redirect writes.", "mitigation": "Contention is made safe rather than fast: WAL plus busy timeout plus a single-connection pool. The ceiling is real and is the reason PostgreSQL is the first change under load; the JPA boundary keeps that a configuration change." },
+      { "category": "Scalability", "risk": "Rate limiting is per instance, so horizontal scaling multiplies the effective quota.", "mitigation": "Documented. A shared counter or an edge policy is required before running more than one replica." },
+      { "category": "Operational", "risk": "The production profile runs with ddl-auto=validate and there is no migration tool, so the first deployment needs a manual schema-creation step.", "mitigation": "Documented in application-prod.properties and LIMITATIONS.md. Flyway is the intended fix." },
+      { "category": "AI-related", "risk": "AI-generated code can be locally plausible and globally wrong — a synchronized block for the click race reads like a fix and would leave the defect in place while making it harder to see.", "mitigation": "Concurrency and error-path claims are settled by tests that fail against the unfixed implementation, not by reading the diff. Every mitigation named in this report has a test that would catch its absence." },
+      { "category": "AI-related", "risk": "An AI-written self-assessment can assert work that was never done — claiming a security issue is fixed while the code still exhibits it is worse than making no claim at all, because it stops the reader looking.", "mitigation": "Report content lives outside the code in a versioned resource and is pinned by CopilotReportAccuracyTest, which fails if a claim of a fix is not backed by the corresponding test or configuration. Claims are written as fixed/open with the evidence named." },
+      { "category": "Correctness", "risk": "Expiry is evaluated against server wall-clock time.", "mitigation": "Clock is injected, so the boundary is asserted deterministically. Cross-instance skew remains an open item." }
+    ]
+  },
+  "final_summary": {
+    "implementation_approach": "A layered Spring Boot service: controllers own HTTP and validation, ShortenerService owns domain logic with no HTTP or static time dependencies, Spring Data JPA owns persistence, and cross-cutting concerns (correlation ids, rate limiting, CORS) live in filters and configuration. AI was used inside each task for drafting and enumeration; correctness decisions — the redirect status code, the concurrency fix, the error contract, the rate-limit key — were made by the engineer, and each is defended by a test rather than by the diff looking reasonable.",
+    "generated_artifacts": [
+      "REST API with OpenAPI 3 contract generated from the controllers",
+      "JPA entities and repositories, including an atomic click increment",
+      "Typed exception hierarchy and a single client-facing error contract",
+      "Correlation-id filter, Micrometer counters, Prometheus endpoint",
+      "Fixed-window rate limiter on the write path",
+      "71 automated tests including concurrency and error-contract regressions",
+      "React and TypeScript frontend",
+      "Architecture, three scenario walkthroughs, AI traceability log, limitations register"
+    ],
+    "risks_and_validation": "The defects that mattered were found by running the service and attacking it, not by reading it: concurrent redirects failing with SQLITE_BUSY, click counts silently losing 80% of increments, internal SQL reaching clients, and short_url reflecting an attacker-chosen Host header. Each is held closed by a test that fails if the mitigation is removed. What remains open is stated as open: no authentication, no caching, per-instance rate limiting, no migration tool, no dependency scanning, and a write-throughput ceiling inherent to SQLite.",
+    "assumptions_and_limitations": "Assumes a single instance, no authentication requirement, and prototype-scale traffic. The known limitations are enumerated with severity and intended fix in docs/LIMITATIONS.md; none of them is a surprise discovered after the fact, and none is described here as solved when it is not."
+  }
+}
