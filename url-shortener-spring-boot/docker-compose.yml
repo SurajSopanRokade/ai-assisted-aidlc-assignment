@@ -1,4 +1,4 @@
-version: '3.8'
+# `version:` is obsolete in Compose v2 and emits a warning; omitted deliberately.
 
 services:
   app:
@@ -6,9 +6,36 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - SPRING_PROFILES_ACTIVE=prod
+      SPRING_PROFILES_ACTIVE: prod
+      # The public origin used to build short_url. Without this the service
+      # would advertise localhost links to every caller.
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:3000}
+      # First boot must create the schema; see application-prod.properties.
+      # Flip to `validate` (the default) once the database file exists.
+      APP_DDL_AUTO: ${APP_DDL_AUTO:-update}
     volumes:
+      # Must match the directory the prod profile actually writes to. If the
+      # mount and the configured database path disagree, the volume holds
+      # nothing and every container replacement silently discards all links —
+      # with no error, because SQLite happily creates the file elsewhere.
       - data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 40s
+      retries: 3
+    restart: unless-stopped
+    # Containment: the app needs no privileges and writes only to the volume.
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          # Bounds the blast radius of a leak or a runaway request on a shared
+          # host. MaxRAMPercentage in the image sizes the heap from this limit.
+          memory: 512M
 
 volumes:
   data:
