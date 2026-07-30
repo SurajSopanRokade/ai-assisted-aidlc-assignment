@@ -28,12 +28,30 @@ export interface AnalyticsResponse {
   original_url: string
   click_count: number
   created_at: string
+  expires_at: string | null
+  /**
+   * Computed server-side against the server clock. Trust this rather than
+   * comparing expires_at locally: the backend sends a zone-less LocalDateTime,
+   * so a client-side comparison is wrong for any user outside the server's
+   * timezone.
+   */
+  expired: boolean
   last_clicked_at: string | null
 }
 
-/** GlobalExceptionHandler returns this shape for every non-2xx response. */
+/**
+ * GlobalExceptionHandler returns this shape for every non-2xx response.
+ *
+ * `detail` is always safe to show a user. 5xx responses carry `error_id`
+ * instead of a cause — the cause stays in the server log, and the id is what
+ * correlates a user's report to it.
+ */
 export interface ErrorResponse {
   detail: string
+  /** Present on 5xx only. Show it, so a user can quote it in a bug report. */
+  error_id?: string
+  /** Present on validation failures: field name to message. */
+  field_errors?: Record<string, string>
 }
 
 // ---------------------------------------------------------------- copilot

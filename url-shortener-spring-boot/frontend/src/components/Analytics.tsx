@@ -23,7 +23,9 @@ export function Analytics({
     try {
       setData(await getAnalytics(code.trim()))
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err))
+      // displayMessage appends the correlation id on 5xx, so a user reporting
+      // a failure can quote something the logs can be searched by.
+      setError(err instanceof ApiError ? err.displayMessage : String(err))
     } finally {
       setLoading(false)
     }
@@ -69,15 +71,36 @@ export function Analytics({
           </div>
 
           <Card>
-            <p className="text-xs text-slate-500">Destination</p>
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-xs text-slate-500">Destination</p>
+              {/* `expired` is computed server-side; comparing expires_at here
+                  would be wrong for any user outside the server's timezone,
+                  because the backend sends a zone-less LocalDateTime. */}
+              {data.expires_at &&
+                (data.expired ? (
+                  <span className="rounded-full bg-rose-500/10 px-2 py-0.5 text-xs font-medium text-rose-300">
+                    Expired
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-300">
+                    Expires {formatDateTime(data.expires_at)}
+                  </span>
+                ))}
+            </div>
             <a
               href={data.original_url}
               target="_blank"
               rel="noreferrer"
-              className="break-all text-slate-200 underline-offset-4 hover:text-indigo-300 hover:underline"
+              className="mt-1 block break-all text-slate-200 underline-offset-4 hover:text-indigo-300 hover:underline"
             >
               {data.original_url}
             </a>
+            {data.expired && (
+              <p className="mt-3 text-xs text-slate-500">
+                This link no longer redirects — it returns 410 Gone. Analytics stay
+                readable so the historical numbers are not lost.
+              </p>
+            )}
             {data.click_count === 0 && (
               <div className="mt-3">
                 <Empty>This link has not been clicked yet.</Empty>

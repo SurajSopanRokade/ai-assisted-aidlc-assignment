@@ -35,7 +35,7 @@ export function Shortener({
       setResult(response)
       onShortened(response.short_code)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err))
+      setError(err instanceof ApiError ? err.displayMessage : String(err))
     } finally {
       setLoading(false)
     }

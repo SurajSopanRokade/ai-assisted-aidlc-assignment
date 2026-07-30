@@ -42,7 +42,7 @@ export function CopilotPanel() {
       setData(await analyzeRequirement(requirement.trim()))
       setTab('Requirements')
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err))
+      setError(err instanceof ApiError ? err.displayMessage : String(err))
       setData(null)
     } finally {
       setLoading(false)
