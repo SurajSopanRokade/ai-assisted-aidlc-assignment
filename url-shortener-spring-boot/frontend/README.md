@@ -34,6 +34,9 @@ inherit the rules above, so `application.properties` whitelists the frontend
 origin again under `management.endpoints.web.cors.*`. Without it the header
 health indicator reports "API unreachable" even though the API is fine.
 
+Both origin lists now come from `APP_CORS_ORIGINS`, so a deployment sets one
+variable rather than editing two files that must agree.
+
 ### Pointing at a different backend
 
 The API base URL defaults to `http://localhost:8080` and can be overridden:
@@ -67,7 +70,27 @@ src/
   App.tsx            Top-level view switching and API health indicator
 ```
 
+## Error handling
+
+`api/client.ts` throws `ApiError` for every non-2xx. Three things come off the
+backend's error envelope:
+
+- `detail` — always safe to display.
+- `error_id` — 5xx only. `ApiError.displayMessage` appends it, so a user
+  reporting a failure quotes something the server logs can be searched by.
+- `field_errors` — validation failures. Flattened into the message so the user
+  sees which field is wrong instead of a bare "Validation failed".
+
 ## Notes for future work
+
+- **No automated tests.** The app is typechecked (`tsc -b`) and linted, but has
+  no test suite — see `docs/LIMITATIONS.md`. `api/types.ts` mirrors the backend
+  DTOs by hand, so a backend contract change is only caught at compile time if
+  someone updates the types too. Generating them from `/v3/api-docs` would
+  remove that failure mode.
+- **Trust `expired` from the server, never compare `expires_at` locally.** The
+  backend sends a zone-less `LocalDateTime`; a client-side comparison is wrong
+  for any user outside the server's timezone.
 
 - **Short links are rendered as plain `<a href>`, never fetched.**
   `GET /{shortCode}` returns a 307 to an arbitrary external origin; following
